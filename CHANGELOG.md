@@ -1,3 +1,16 @@
+## 1.5.2 - 25.10.2020
+
+* Android: fix bug notification stuck in processing
+
+## 1.5.1 - 27.09.2020
+
+* iOS: fix bug missing update download progress
+
+## 1.5.0 - 09.08.2020
+
+* Update `pubspec` to new format
+* Upgrade `AndroidWorkManager` to v2.4.0
+
 ## 1.4.4 - 18.04.2020
 
 * add `debug` (optional) parameter in `initialize()` method that supports disable logging to console
