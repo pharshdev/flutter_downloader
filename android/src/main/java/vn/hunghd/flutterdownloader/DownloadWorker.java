@@ -71,13 +71,15 @@ public class DownloadWorker extends Worker implements MethodChannel.MethodCallHa
     private static final String TAG = DownloadWorker.class.getSimpleName();
     private static final int BUFFER_SIZE = 4096;
     private static final String CHANNEL_ID = "FLUTTER_DOWNLOADER_NOTIFICATION";
-    private static final int STEP_UPDATE = 10;
+    private static final int STEP_UPDATE = 5;
 
     private static final AtomicBoolean isolateStarted = new AtomicBoolean(false);
     private static final ArrayDeque<List> isolateQueue = new ArrayDeque<>();
     private static FlutterNativeView backgroundFlutterView;
 
     private final Pattern charsetPattern = Pattern.compile("(?i)\\bcharset=\\s*\"?([^\\s;\"]*)");
+    private final Pattern filenameStarPattern = Pattern.compile("(?i)\\bfilename\\*=([^']+)'([^']*)'\"?([^\"]+)\"?");
+    private final Pattern filenamePattern = Pattern.compile("(?i)\\bfilename=\"?([^\"]+)\"?");
 
     private MethodChannel backgroundChannel;
     private TaskDbHelper dbHelper;
@@ -189,6 +191,14 @@ public class DownloadWorker extends Worker implements MethodChannel.MethodCallHa
         updateNotification(context, filename == null ? url : filename, DownloadStatus.RUNNING, task.progress, null, false);
         taskDao.updateTask(getId().toString(), DownloadStatus.RUNNING, task.progress);
 
+        //automatic resume for partial files. (if the workmanager unexpectedly quited in background)
+        String saveFilePath = savedDir + File.separator + filename;
+        File partialFile = new File(saveFilePath);
+        if (partialFile.exists()) {
+            isResume = true;
+            log("exists file for "+ filename + "automatic resuming...");
+        }
+
         try {
             downloadFile(context, url, savedDir, filename, headers, isResume);
             cleanUp();
@@ -284,7 +294,7 @@ public class DownloadWorker extends Worker implements MethodChannel.MethodCallHa
                         log("Response with redirection code");
                         location = httpConn.getHeaderField("Location");
                         log("Location = " + location);
-                        base = new URL(fileURL);
+                        base = new URL(url);
                         next = new URL(base, location);  // Deal with relative URLs
                         url = next.toExternalForm();
                         log("New url: " + url);
@@ -298,7 +308,7 @@ public class DownloadWorker extends Worker implements MethodChannel.MethodCallHa
 
             if ((responseCode == HttpURLConnection.HTTP_OK || (isResume && responseCode == HttpURLConnection.HTTP_PARTIAL)) && !isStopped()) {
                 String contentType = httpConn.getContentType();
-                int contentLength = httpConn.getContentLength();
+                long contentLength = httpConn.getContentLengthLong();
                 log("Content-Type = " + contentType);
                 log("Content-Length = " + contentLength);
 
@@ -310,11 +320,16 @@ public class DownloadWorker extends Worker implements MethodChannel.MethodCallHa
                         String disposition = httpConn.getHeaderField("Content-Disposition");
                         log("Content-Disposition = " + disposition);
                         if (disposition != null && !disposition.isEmpty()) {
-                            String name = disposition.replaceFirst("(?i)^.*filename=\"?([^\"]+)\"?.*$", "$1");
-                            filename = URLDecoder.decode(name, charset != null ? charset : "ISO-8859-1");
+                            filename = getFileNameFromContentDisposition(disposition, charset);
                         }
                         if (filename == null || filename.isEmpty()) {
                             filename = url.substring(url.lastIndexOf("/") + 1);
+                            try {
+                                filename = URLDecoder.decode(filename, "UTF-8");
+                            } catch (IllegalArgumentException e) {
+                                /* ok, just let filename be not encoded */
+                                e.printStackTrace();
+                            }
                         }
                     }
                 }
@@ -564,6 +579,31 @@ public class DownloadWorker extends Worker implements MethodChannel.MethodCallHa
             return m.group(1).trim().toUpperCase();
         }
         return null;
+    }
+
+    private String getFileNameFromContentDisposition(String disposition, String contentCharset) throws java.io.UnsupportedEncodingException {
+        if (disposition == null)
+            return null;
+
+        String name = null;
+        String charset = contentCharset;
+
+        //first, match plain filename, and then replace it with star filename, to follow the spec
+
+        Matcher plainMatcher = filenamePattern.matcher(disposition);
+        if (plainMatcher.find())
+            name = plainMatcher.group(1);
+
+        Matcher starMatcher = filenameStarPattern.matcher(disposition);
+        if (starMatcher.find()) {
+            name = starMatcher.group(3);
+            charset = starMatcher.group(1).toUpperCase();
+        }
+
+        if (name == null)
+            return null;
+
+        return URLDecoder.decode(name, charset != null ? charset : "ISO-8859-1");
     }
 
     private String getContentTypeWithoutCharset(String contentType) {
